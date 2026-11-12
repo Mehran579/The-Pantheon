@@ -9,6 +9,8 @@ public struct DamageInfo
     public Vector2 origin;
     public GameObject source;
     public EnemyAttackHitbox enemyAttack;
+    public float knockbackSpeed;
+    public float knockbackDuration;
 }
 
 /// <summary>Implement this on any enemy / boss part. Put it on the same object as the Collider2D or on a parent.</summary>
@@ -49,7 +51,8 @@ public static class Combat
     /// hits dedupes per IDamageable (or per collider when perCollider is true, e.g. radial bursts that should hit every boss part).
     /// </summary>
     public static int Damage(Collider2D[] cols, int damage, Vector2 origin, GameObject source,
-                             HashSet<object> hits, out Collider2D firstHit, bool perCollider = false)
+                             HashSet<object> hits, out Collider2D firstHit, bool perCollider = false,
+                             float knockbackSpeed = 0f, float knockbackDuration = 0f)
     {
         firstHit = null;
         int count = 0;
@@ -60,7 +63,13 @@ public static class Combat
             if (d == null) continue;
             object key = perCollider ? (object)c : d;
             if (!hits.Add(key)) continue;
-            d.TakeDamage(new DamageInfo { damage = damage, origin = origin, source = source });
+            d.TakeDamage(new DamageInfo {
+                damage = damage,
+                origin = origin,
+                source = source,
+                knockbackSpeed = knockbackSpeed,
+                knockbackDuration = knockbackDuration
+            });
             if (firstHit == null) firstHit = c;
             count++;
         }

@@ -47,6 +47,10 @@ public partial class LokiController : MonoBehaviour, IDamageable
 
     [Header("Health / Invulnerability")]
     public int health = 100;
+    public float hurtInvulnerabilityDuration = 0.8f;     // Hollow Knight / Silksong i-frames after being hit
+    public float hurtKnockbackSpeed = 10f;               // Horizontal recoil away from hit
+    public float hurtKnockbackUpSpeed = 4f;              // Vertical lift when hit
+    public float hurtKnockbackDuration = 0.2f;           // Duration player control is locked
 
     [Header("Movement")]
     public float moveSpeed = 8f;
@@ -88,6 +92,16 @@ public partial class LokiController : MonoBehaviour, IDamageable
     public BoxHitbox swordForward = new BoxHitbox(new Vector2(1.3f, 0f), new Vector2(1.8f, 1.4f), Color.green);
     public BoxHitbox swordUp = new BoxHitbox(new Vector2(0f, 1.5f), new Vector2(1.6f, 1.6f), Color.green);
     public BoxHitbox swordDown = new BoxHitbox(new Vector2(0f, -1.5f), new Vector2(1.6f, 1.6f), Color.green);
+
+    [Header("Pogo (Downward Sword hit in the air)")]
+    public float pogoBounceVelocity = 14f;    // upward speed applied on a successful downward hit
+    public bool pogoResetsAirJumps = true;    // pogo restores air jumps (true = very generous, false = tighter)
+
+    [Header("Nail Recoil on Attack Hit")]
+    public float swordRecoilSpeed = 6f;       // Hollow Knight / Silksong pushback on hitting an enemy with normal slash
+    public float swordRecoilDuration = 0.08f; // Short duration for nail recoil
+    public float enemyKnockbackSpeed = 8f;    // Knockback applied to hit enemies
+    public float enemyKnockbackDuration = 0.15f;
 
     [Header("Sword Charge / Nail Art (Great Slash)")]
     public float swordChargeTime = 0.8f;       // hold time for a full charge
@@ -367,16 +381,48 @@ public partial class LokiController : MonoBehaviour, IDamageable
             rb.linearVelocity = new Vector2(dashDir * dashSpeed, 0f);
             return;
         }
+        if (IsKnockedBack)                                    // knockback: horizontal control suspended while it fades out
+        {
+            float k = 1f - (Time.time - knockStart) / knockDuration;
+            rb.linearVelocity = new Vector2(knockVx * Mathf.Clamp01(k), rb.linearVelocity.y);
+            return;
+        }
         float target = move.x * moveSpeed * CurrentMoveMultiplier();
         float accel = grounded ? groundAcceleration : airAcceleration;
         float vx = Mathf.MoveTowards(rb.linearVelocity.x, target, accel * Time.fixedDeltaTime);
         rb.linearVelocity = new Vector2(vx, rb.linearVelocity.y);
     }
 
+    // ---------- Status effects applied by enemies (Ohsyra) ----------
+    float slowUntil, slowMultiplier = 1f;
+    public bool IsSlowed { get { return Time.time < slowUntil; } }
+    /// Returns false (and does nothing) if already slowed: the slow never re-stacks or refreshes.
+    public bool ApplySlow(float duration, float multiplier)
+    {
+        if (IsSlowed) return false;
+        slowUntil = Time.time + duration;
+        slowMultiplier = Mathf.Clamp01(multiplier);
+        return true;
+    }
+
+    float knockVx, knockStart = -999f, knockDuration;
+    public bool IsKnockedBack { get { return Time.time < knockStart + knockDuration; } }
+    /// Horizontal speed fades to 0 over duration (player horizontal control is suspended meanwhile); y is an optional one-off lift.
+    /// Ignored while already knocked back, so hits cannot chain-launch Loki.
+    public bool ApplyKnockback(Vector2 velocity, float duration, bool overrideCurrent = false)
+    {
+        if ((!overrideCurrent && IsKnockedBack) || duration <= 0f) return false;
+        knockVx = velocity.x;
+        knockStart = Time.time;
+        knockDuration = duration;
+        rb.linearVelocity = new Vector2(velocity.x, Mathf.Max(rb.linearVelocity.y, velocity.y));
+        return true;
+    }
+
     float CurrentMoveMultiplier()
     {
-        if (state == PlayerState.Free) return (sword.charging || magic.charging) ? chargeMoveMultiplier : 1f;
-        return actionMoveMultiplier;
+        float m = state == PlayerState.Free ? ((sword.charging || magic.charging) ? chargeMoveMultiplier : 1f) : actionMoveMultiplier;
+        return IsSlowed ? m * slowMultiplier : m;
     }
 
     void FaceInput()
@@ -769,12 +815,30 @@ public partial class LokiController : MonoBehaviour, IDamageable
         yield return new WaitForSeconds(swordStartup);
 
         HashSet<object> hits = new HashSet<object>();
+        bool pogoTriggered = false;
+        bool recoilTriggered = false;
         float end = Time.time + swordActiveTime;
         while (Time.time < end)
         {
             Collider2D[] cols = QueryBox(hb.Center(Pos, Dir), hb.size, 0f, hb.color);
-            int n = Combat.Damage(cols, swordDamage, Pos, gameObject, hits, out _);
-            if (n > 0) soul.AddSoul(soulPerSwordHit * n);
+            int n = Combat.Damage(cols, swordDamage, Pos, gameObject, hits, out _, false, enemyKnockbackSpeed, enemyKnockbackDuration);
+            if (n > 0)
+            {
+                soul.AddSoul(soulPerSwordHit * n);
+                // Pogo: downward attack while airborne bounces Loki upward
+                if (aim == Aim.Down && !grounded && !pogoTriggered)
+                {
+                    pogoTriggered = true;
+                    rb.linearVelocity = new Vector2(rb.linearVelocity.x, pogoBounceVelocity);
+                    if (pogoResetsAirJumps) airJumpsLeft = maxAirJumps;
+                }
+                // Horizontal sword attack recoil (Hollow Knight / Silksong nail pushback)
+                else if (aim == Aim.Forward && !recoilTriggered)
+                {
+                    recoilTriggered = true;
+                    ApplyKnockback(new Vector2(-Dir * swordRecoilSpeed, 0f), swordRecoilDuration, true);
+                }
+            }
             yield return new WaitForFixedUpdate();
         }
         yield return new WaitForSeconds(swordRecovery);
@@ -1068,6 +1132,19 @@ public partial class LokiController : MonoBehaviour, IDamageable
         if (Invulnerable) return;
         health -= info.damage;
         Debug.Log("Loki took " + info.damage + " damage (hp " + health + ")");
+
+        // Hollow Knight / Silksong white flash + camera shake
+        HitBlinker.Flash(gameObject);
+        CameraShake.Shake(0.15f, 0.25f);
+
+        // Hurt knockback away from hit origin / damage source
+        float dirX = Pos.x - info.origin.x;
+        if (Mathf.Abs(dirX) < 0.01f) dirX = -facing;
+        float sgn = dirX < 0f ? -1f : 1f;
+        ApplyKnockback(new Vector2(sgn * hurtKnockbackSpeed, hurtKnockbackUpSpeed), hurtKnockbackDuration, true);
+
+        // Post-damage invulnerability frames
+        StartCoroutine(InvulnerabilityRoutine(hurtInvulnerabilityDuration));
     }
 
     // =====================================================================
